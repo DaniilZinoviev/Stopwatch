@@ -2,14 +2,24 @@ body {
     background: url('/img/background21.png') repeat center center;
 }
 main {
-    padding-top: 40px;
-    width: 700px;
     margin: 0 auto;
     font-family: Arial, Helvetica, sans-serif;
     font-size: 2em;
     text-align: center;
 }
 
+main p {
+    font-size: 16px;
+    line-height: 1.5;
+    font-family: Cambria, Cochin, Georgia, Times, 'Times New Roman', serif;
+    width: 300px;
+    padding: 10px;
+    margin: 20px auto;
+    margin-top: 60px;
+    background-color: rgba(255,255,255,0.6);
+    border: 1px solid #000;
+    border-radius: 5px;
+}
 .stopwatch button {
     display: inline-block;
     padding: 6px 10px;
@@ -51,5 +61,5 @@ button.stopwatch-reset {
     border: 3px solid rgb(175, 175, 175);
     border-radius: 5px;
     font-size: 18px;
-} margin: 10px auto;
 }
+
