@@ -1,0 +1,15 @@
+sailevents_prepopulate_field.admin_config_sailevents:
+  path: '/admin/config/sailevents_prepopulate_field'
+  defaults:
+    _controller: '\Drupal\system\Controller\SystemController::systemAdminMenuBlockPage'
+    _title: 'Sailevents'
+  requirements:
+    _permission: 'access administration pages'
+    
+sailevents_prepopulate_field.settings:
+  path: 'admin/config/sailevents-config/settings'
+  defaults:
+    _form: '\Drupal\sailevents_prepopulate_field\Form\SaileventsSettingsForm'
+    _title: 'Sailevents Settings'
+  requirements:
+    _permission: 'administer site configuration'

@@ -1,0 +1,33 @@
+sailevents_prepopulate_field.datetimepicker:
+  js:
+    js/jquery.datetimepicker.full.min.js: {}
+    js/sailevents_prepopulate_field.datetimepicker.js: {}
+  css:
+    component:
+      css/jquery.datetimepicker.min.css: {}
+  dependencies:
+    - core/jquery
+    - core/drupal
+    - core/drupalSettings
+    - core/jquery.once
+sailevents_prepopulate_field.toggle_field:
+  js:
+    js/sailevents_prepopulate_field.toggle_field.js: {}
+  dependencies:
+    - core/jquery
+    - core/drupal
+    - core/drupalSettings
+    - core/jquery.once
+sailevents_prepopulate_field.event_message:
+  js:
+    js/sailevents_prepopulate_field.event_message.js: {}
+  dependencies:
+    - core/jquery
+    - core/drupal
+    - core/drupalSettings
+    - core/jquery.once
+
+sailevents_prepopulate_field.form_css:
+  css:
+    component:
+      css/sailevents_prepopulate_field.form_css.css: {}

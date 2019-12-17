@@ -1,0 +1,12 @@
+sailevents_prepopulate_field.admin_config_sailevents:
+  title: 'Sailevents'
+  route_name: sailevents_prepopulate_field.admin_config_sailevents
+  parent: system.admin_config
+  description: 'Sailevents configuration.'
+
+sailevents_prepopulate_field.settings:
+  title: 'Sailevents settings'
+  description: 'Sailevents module settings'
+  parent: sailevents_prepopulate_field.admin_config_sailevents
+  route_name: sailevents_prepopulate_field.settings
+  weight: 100

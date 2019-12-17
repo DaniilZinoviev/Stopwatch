@@ -1,0 +1,669 @@
+<?php
+
+/**
+ * @file
+ * The main file for the sailevents_prepopulate_field module
+ */
+
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Drupal\Core\Datetime\DrupalDateTime;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Ajax\ReplaceCommand;
+use Drupal\Core\Ajax\AjaxResponse;
+use Drupal\Core\Url;
+use Drupal\views\Plugin\views\query\QueryPluginBase;
+use Drupal\views\ViewExecutable;
+use Drupal\node\Entity\Node;
+use Drupal\user\Entity\User;
+
+/*
+ *   Implements hook_form_alter.   
+ */
+function sailevents_prepopulate_field_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+
+  // Remove "Preview" button from all forms, save Page and article
+  if (
+    $form_id === 'node_page_form' ||
+    $form_id === 'node_page_edit_form' ||
+    $form_id === 'node_article_form' ||
+    $form_id === 'node_article_edit_form'
+  ) {} else {
+    $form['actions']['preview']['#access'] = FALSE;
+  }
+
+  // Sets default value for field "Celebration" with last active celebration
+  $field = '';
+
+  // Get celebration field based on form id
+  switch($form_id) {
+    case 'node_event_form':
+    case 'node_event_edit_form':
+      $field = 'field_event_celebration';
+      break;
+    case 'node_plan_form':
+    case 'node_plan_edit_form':
+      $field = 'field_plan_celebration';
+      break;
+    case 'node_contest_form':
+    case 'node_contest_edit_form':
+      $field = 'field_contest_celebration';
+      break;
+  }
+
+  // Set default value for Active Celebration Field
+  if ($form_id === 'node_event_form' || $form_id === 'node_plan_form' || $form_id === 'node_contest_form') {
+
+    # Form "Add content"
+
+    // Get default active celebration
+    $config = \Drupal::config('sailevents_prepopulate_field.settings');
+    $celeb_nid = $config->get('active_celebration_id');
+    $user = \Drupal::currentUser();
+    
+    $celeb_node = null;
+
+    // Active celebration node
+    if (!is_null($celeb_nid)) {
+      $celeb_node = \Drupal::entityTypeManager()->getStorage('node')->load($celeb_nid);
+    }
+
+    // Set default value for entity reference with active celebration
+    if ($field && $celeb_node && $form[$field]) {
+      $form[$field]['widget'][0]['target_id']['#default_value'] = $celeb_node;
+      $form[$field]['widget']['#after_build'][] = 'sailevents_prepopulate_field_after_build';
+    }
+
+    // "Event" content type
+    if ($form_id === 'node_event_form') {
+
+      if ($form['field_date']) {
+        // Default value for field_date based on date of active celebration field
+        if ($celeb_node && $form['field_date']) {
+          $celeb_date_raw = $celeb_node->get('field_celebration_date')->getString();
+          $formatted_celeb_date = date('m/d/Y', strtotime($celeb_date_raw));
+          $form['field_date']['widget'][0]['value']['#default_value'] = $formatted_celeb_date.' 12:00 PM';
+        }
+
+        // Attach custom libraries
+        $form['field_date']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.datetimepicker';
+      }
+
+      // 'Geolocation' field in "Event" content type
+      if ($form['field_location']) {
+        // Change default text
+        $form['field_location']['map']['#controls']['geolocation_address']['address_pull']['#value'] = t('Set Marker from Address field');
+        $form['field_location']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.form_css';
+      }
+
+      // Autofill
+      if ($form['field_event_organizer_id']) {
+        $user_obj = \Drupal\user\Entity\User::load($user->id());
+        $form['field_event_organizer_id']['widget'][0]['target_id']['#default_value'] = $user_obj;
+
+        if (is_user_only_authenticated($user)) {
+          $form['field_event_organizer_id']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
+        }
+      }
+
+      // For just Authenticated User (not admin or moderator) - disallow Celebration changing
+      if (is_user_only_authenticated($user) && $form['field_event_celebration']) {
+        $form['field_event_celebration']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
+      }
+
+    }    
+
+    if ($form_id === 'node_plan_form') {
+      // If user is not admin - make Celebration field readonly
+
+      if (!is_user_super_admin($user) && $form['field_plan_celebration']) {
+        if (!is_null($celeb_node)) {
+          $form['field_plan_celebration']['widget']['#prefix'] = '<div class="col-auto plan-celebration"><h2>Celebration: '.$celeb_node->getTitle().'</h2></div>';
+        }
+        $form['field_plan_celebration']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
+      }
+
+      // Autofill title and make it readonly
+      $form['title']['widget'][0]['value']['#default_value'] = create_plan_title($celeb_node, $user);
+      $form['title']['widget'][0]['value']['#attributes']['readonly'] = 'readonly';
+
+      // Change default "- None -" to "- Select -" of select list
+      $form['field_participation_type']['widget']['#options']['_none'] = '- Select -';
+
+      // Display geomap after button click if it has not been picked
+      if (empty($form['field_location']['widget'][0]['#default_value'])) {
+        $form['field_location']['widget']['#prefix'] = '<div class="col-auto plan-destination-wrap"><a class="button btn btn-secondary text-white js-plan-destination-btn">Set your Personal Plan Destination</a></div>';
+        $form['field_location']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.toggle_field';
+        $form['field_location']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.form_css';
+      }
+
+      // Redirect action links
+      foreach (array_keys($form['actions']) as $action) {
+        // Redirect submit
+        if ( $action != 'preview' && isset($form['actions'][$action]['#type']) && $form['actions'][$action]['#type'] === 'submit') {
+          $form['actions'][$action]['#submit'][] = 'sailevents_prepopulate_field_plan_redirect_submit';
+        }
+      }
+
+      // Handle selection "Event" in "Participation Type"
+      if ($form['field_participation_type']) {
+        $form['field_participation_type']['#attached']['library'] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.event_message';
+      }
+
+      // On change celebration field update Events
+        $form['field_plan_event']['#prefix'] = '<div id="field-plan-event-wrap">';
+        $form['field_plan_event']['#suffix'] = '</div>';
+
+        $form['field_plan_celebration']['widget'][0]['target_id']['#ajax'] = array(
+          'callback' => 'sailevents_prepopulate_field_ajax_event_update',
+          'event' => 'change',
+          'wrapper' => 'field-plan-event-wrap'
+        );
+
+        if ($form['field_plan_celebration']['widget'][0]['target_id']['#default_value']) {
+          $celeb_nid = $form['field_plan_celebration']['widget'][0]['target_id']['#default_value']->id();
+        }
+
+        // Get $form_state for ajax
+        $ajax_state = $form_state->getUserInput();
+
+        if (!empty($ajax_state) && $ajax_state['field_plan_celebration'] && $ajax_state['field_plan_celebration'][0]['target_id']) {
+          // $celeb_output is about to 'ss1111 (24)'
+          $celeb_output = $ajax_state['field_plan_celebration'][0]['target_id'];
+          preg_match('/\((.+)\)/', $celeb_output, $celeb_nid);
+          $celeb_nid = $celeb_nid[1];
+
+          // Clear select
+          $form['field_plan_event']['widget']['#default_value'] = array();
+        }
+
+        $form['field_plan_event']['widget']['#options'] = create_celebration_event_list($celeb_nid);
+
+    }
+
+  }
+  elseif ($form_id === 'node_event_edit_form' || $form_id === 'node_plan_edit_form' || $form_id === 'node_contest_edit_form') {
+
+    # Form "Edit content" 
+
+    // Get default active celebration
+    $config = \Drupal::config('sailevents_prepopulate_field.settings');
+    $celeb_nid = $config->get('active_celebration_id');
+    $user = \Drupal::currentUser();
+
+    if (isset($field)) {
+      $form[$field]['widget']['#after_build'][] = 'sailevents_prepopulate_field_after_build';
+    }
+
+    if ($form_id === 'node_event_edit_form') {
+
+      if ($form['field_date']) {
+        // Attach custom libraries
+        $form['field_date']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.datetimepicker';
+      }
+
+      // For just Authenticated User (not admin or moderator) - disallow Celebration changing
+      if (is_user_only_authenticated($user)) {
+        $form['field_event_celebration']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
+      }
+
+      if ($form['field_location']) {
+        $form['field_location']['map']['#controls']['geolocation_address']['address_pull']['#value'] = t('Set Marker from Address field');
+        $form['field_location']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.form_css';
+      }
+
+    }
+
+    if ($form_id === 'node_plan_edit_form') {
+      // Set title as readonly field
+      $form['title']['widget'][0]['value']['#attributes']['readonly'] = 'readonly';
+
+      // Redirect action links
+      foreach (array_keys($form['actions']) as $action) {
+        // Redirect submit
+        if ( $action != 'preview' && isset($form['actions'][$action]['#type']) && $form['actions'][$action]['#type'] === 'submit') {
+          $form['actions'][$action]['#submit'][] = 'sailevents_prepopulate_field_plan_redirect_submit';
+        }
+        // Redirect cancel
+        if ( isset($form['actions'][$action]['#type']) && $form['actions'][$action]['#type'] === 'link' && $form['actions'][$action]['#title']->__toString() === 'Cancel') {
+          # /node/18 = fixed 'My Plan' page.
+          $targetPageId = 18;
+          $form['actions'][$action]['#url'] = Url::fromRoute('entity.node.canonical', array('node' => $targetPageId));
+        }
+      }
+
+      // Display geomap after button click if it has not been picked
+      if (empty($form['field_location']['widget'][0]['#default_value'])) {
+        $form['field_location']['widget']['#prefix'] = '<div class="col-auto plan-destination-wrap"><a class="button btn btn-secondary text-white js-plan-destination-btn">Set your Personal Plan Destination</a></div>';
+        $form['field_location']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.toggle_field';
+        $form['field_location']['#attached']['library'][] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.form_css';
+      }
+
+      // Handle selection "Event" in "Participation Type"
+      if ($form['field_participation_type']) {
+        $form['field_participation_type']['widget']['#options']['_none'] = '- Select -';
+        $form['field_participation_type']['#attached']['library'] = 'sailevents_prepopulate_field/sailevents_prepopulate_field.event_message';
+      }
+
+      if ($form['field_plan_celebration'] && $form['field_plan_event']) {
+        // On change celebration field update Events
+        $form['field_plan_event']['#prefix'] = '<div id="field-plan-event-wrap">';
+        $form['field_plan_event']['#suffix'] = '</div>';
+
+        // If user is not admin - make Celebration field readonly
+        if (!is_user_super_admin($user)) {
+          $celeb_node = $form['field_plan_celebration']['widget'][0]['target_id']['#default_value'];
+          $form['field_plan_celebration']['widget']['#prefix'] = '<div class="col-auto plan-celebration"><h2>Celebration: '.$celeb_node->getTitle().'</h2></div>';
+          $form['field_plan_celebration']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
+
+          // Replace select with event title, if event has been selected
+          if (!empty($form['field_plan_event']['widget']['#default_value'])) {
+            $event_id = $form['field_plan_event']['widget']['#default_value'][0];
+            $event_name = Node::load($event_id)->getTitle();
+            $form['field_plan_event']['#prefix'] = '<div id="field-plan-event-wrap" class="without-select"><div class="event-info"><div class="label">Event you\'ve signed up for:</div><h3>'.$event_name.'</h3></div>';
+          }
+
+        }
+
+
+
+        $form['field_plan_celebration']['widget'][0]['target_id']['#ajax'] = array(
+          'callback' => 'sailevents_prepopulate_field_ajax_event_update',
+          'event' => 'change',
+          'wrapper' => 'field-plan-event-wrap'
+        );
+
+        if ($form['field_plan_celebration']['widget'][0]['target_id']['#default_value']) {
+          $celeb_nid = $form['field_plan_celebration']['widget'][0]['target_id']['#default_value']->id();
+        }
+
+        // Get $form_state for ajax
+        $ajax_state = $form_state->getUserInput();
+
+        if (!empty($ajax_state) && $ajax_state['field_plan_celebration'] && $ajax_state['field_plan_celebration'][0] && $ajax_state['field_plan_celebration'][0]['target_id']) {
+          // $celeb_output is about to 'ss1111 (24)'
+          $celeb_output = $ajax_state['field_plan_celebration'][0]['target_id'];
+          preg_match('/\((.+)\)/', $celeb_output, $celeb_nid);
+          $celeb_nid = $celeb_nid[1];
+
+          // Clear select
+          $form['field_plan_event']['widget']['#default_value'] = array();
+        }
+
+        $form['field_plan_event']['widget']['#options'] = create_celebration_event_list($celeb_nid);
+
+      }
+
+    }
+
+  }
+
+}
+
+/*
+ *   Implements hook_entity_presave().
+ *
+ */
+function sailevents_prepopulate_field_node_presave(Drupal\Core\Entity\EntityInterface $entity) {
+
+  // Sets default value for unmandatory "Title"-field for some content types
+  switch ($entity->bundle()) {
+    // Node ID
+    case 'celebration_sponsor':
+      $entity->setTitle('Celebration Sponsor '.date('Y.m.d H:i'));
+      break;
+    case 'contest_entry':
+      $entity->setTitle('Contest Entry '.date('Y.m.d H:i'));
+      break;
+    case 'plan':
+      // Clear value for fields if Participation type do not refers to it
+      $participation_type = $entity->field_participation_type->value;
+
+      if ($participation_type !== 'event') {
+        $entity->set('field_plan_event', null);
+      } 
+
+      if ($participation_type !== 'personal_plan' ) {
+        $entity->set('field_location', null);
+        $entity->set('field_whos_boat', null);
+      }
+
+      if ($entity->field_whos_boat->value !== 'My boat') {
+        $entity->set('field_number_participants', null);
+      }
+
+      // Autofill Plan Title field after save
+      $user = \Drupal::currentUser();
+      $celeb_nid = $entity->get('field_plan_celebration')->getString();
+      $celeb_node = null;
+
+      if ($celeb_nid) {
+        $celeb_node = \Drupal::entityTypeManager()->getStorage('node')->load($celeb_nid);
+      }
+      
+      break;
+    case 'event':
+      $user = \Drupal::currentUser();
+      $celeb_id = $entity->get('field_event_celebration')->getString();
+
+      if (is_user_only_authenticated($user)) {
+        // Check, if user has created event for this celebration
+        // If true - send error (user can create only one event for celebration)
+        $user_events = \Drupal::entityQuery('node')
+          ->condition('type', 'event')
+          ->condition('field_event_organizer_id', $user->id())
+          ->condition('field_event_celebration', $celeb_id)
+          ->execute();
+
+        if (!empty($user_events)) {
+          $response = new RedirectResponse(\Drupal::request()->getRequestUri());
+          $response->send();
+          drupal_set_message(t('Please contact Sailstice Support.'), 'error', TRUE);
+          exit;
+        }
+      }
+
+      break;
+  }
+}
+
+/**
+ *  Implements hook_ENTITY_TYPE_update().
+ */
+function sailevents_prepopulate_field_node_update(Drupal\Core\Entity\EntityInterface $node) {
+  set_event_to_plan($node);
+}
+
+/**
+ *  Implements hook_ENTITY_TYPE_insert().
+ */
+function sailevents_prepopulate_field_node_insert(Drupal\Core\Entity\EntityInterface $node) {
+  set_event_to_plan($node);
+}
+
+/**
+ *  Implements hook_ENTITY_TYPE_insert().
+ */
+function sailevents_prepopulate_field_user_update(Drupal\Core\Entity\EntityInterface $user) {
+
+  if ($user->getLastAccessedTime() > 0 ) {
+    // Fires only if user has entered in his account - not after creation
+    $config = \Drupal::config('sailevents_prepopulate_field.settings');
+    $celeb_id = $config->get('active_celebration_id');
+
+    $user_plans = \Drupal::entityQuery('node')
+        ->condition('uid', $user->id())
+        ->condition('type', 'plan')
+        ->condition('status', 1)
+        ->condition('field_plan_celebration', $celeb_id)
+        ->execute();
+
+    if (empty($user_plans)) {
+      // fires only when user updates at first time
+      $celeb_node = \Drupal::entityTypeManager()->getStorage('node')->load($celeb_id);
+
+      // Create plan for new user
+      $new_plan = Node::create([
+        'type' => 'plan',
+        'title' => create_plan_title($celeb_node, $user),
+        'moderation_state' => [
+           'target_id' => 'published',
+         ],
+        'uid' => $user->id(),
+        'field_plan_details' => 'New plan.',
+        'field_plan_celebration' => $celeb_id,
+        'field_participation_type' => 'personal_plan',
+      ]);
+
+      $new_plan->save();
+
+      // Redirect
+      $url = base_path().'/user/'.$user->id().'/user_profile';
+      $response = new Symfony\Component\HttpFoundation\RedirectResponse($url);
+      $response->send();
+      return;
+
+    }
+  }
+
+}
+
+/**
+ *  Implements hook_ENTITY_TYPE_insert().
+ */
+function sailevents_prepopulate_field_user_insert(Drupal\Core\Entity\EntityInterface $user) {
+  // $user->block();
+  // $user->save();
+}
+
+// /**
+//  *  Implements hook_ENTITY_TYPE_create().
+//  */
+// function sailevents_prepopulate_field_user_create(Drupal\Core\Entity\EntityInterface $node) {
+//   $user->block();
+// }
+
+
+
+/**
+ *  Implements hook_views_query_alter().
+ *
+ */
+function sailevents_prepopulate_field_views_query_alter(ViewExecutable $view, QueryPluginBase $query) {
+
+  // Hook to query only that Plans, that has in their field 'field_plan_celebration'
+  // currently active celebration id (Chosed in Sailevents configuration page)
+
+  if ($view->id() == 'user_plan') {
+    foreach ($query->where as &$condition_group) {
+      foreach ($condition_group['conditions'] as &$condition) {
+        if ($condition['field'] == 'node__field_plan_celebration.field_plan_celebration_target_id') {
+          // Query if this Plan refers to current active celebration field
+          $config = \Drupal::config('sailevents_prepopulate_field.settings');
+          $celeb_nid = $config->get('active_celebration_id');
+
+          $condition = [
+            'field' => 'node__field_plan_celebration.field_plan_celebration_target_id',
+            'value' => $celeb_nid,
+            'operator' => '=',
+          ];
+        }
+      }
+    }
+  }
+
+  if ($view->id() == 'active_celebration') {
+    foreach ($query->where as &$condition_group) {
+      foreach ($condition_group['conditions'] as &$condition) {
+        if ($condition['field'] == 'node_field_data.nid') {
+          // Query if this Plan refers to current active celebration field
+          $config = \Drupal::config('sailevents_prepopulate_field.settings');
+          $celeb_nid = $config->get('active_celebration_id');
+
+          $condition = [
+            'field' => 'node_field_data.nid',
+            'value' => $celeb_nid,
+            'operator' => '=',
+          ];
+        }
+      }
+    }
+  }
+}
+
+
+
+/**
+ *  On save event update user plan event reference to this.
+ *  Calls in:
+ *  - hook_ENTITY_TYPE_update().
+ *  - hook_ENTITY_TYPE_insert().
+ */
+function set_event_to_plan(Drupal\Core\Entity\EntityInterface $node) {
+  switch ($node->bundle()) {
+    case 'event':
+      $user = \Drupal::currentUser();
+      $celeb_id = $node->get('field_event_celebration')->getString();
+
+      if (is_user_only_authenticated($user)) {
+        $user_plans = \Drupal::entityQuery('node')
+          ->condition('uid', $user->id())
+          ->condition('type', 'plan')
+          ->condition('status', 1)
+          ->condition('field_plan_celebration', $celeb_id)
+          ->execute();
+
+        // If user has a Plan for this Celebration - set Event to this event
+        if (!empty($user_plans)) {
+          // User has only one Plan, so I load only one Node. 
+          // May cause errors, when user will have 2 or more!
+          $user_plan_nid = array_values($user_plans)[0];
+          $user_plan = Node::load($user_plan_nid);
+          $user_plan->set('field_plan_event', $node->id());
+          $user_plan->save();
+
+          drupal_set_message(t('You are now registered for '.$node->getTitle()).'.', 'status');
+        } else {
+          // Create new Plan for user with this event
+          $celeb_node = Node::load($celeb_id);
+          $new_plan = Node::create([
+            'type' => 'plan',
+            'title' => create_plan_title($celeb_node, $user),
+            'moderation_state' => [
+               'target_id' => 'published',
+             ],
+            'uid' => $user->id(),
+            'field_plan_details' => 'New plan.',
+            'field_participation_type' => 'event',
+            'field_plan_celebration' => $celeb_id,
+            'field_plan_event' => $node->id(),
+          ]);
+          $new_plan->save();
+
+          drupal_set_message(t('You are now registered for '.$node->getTitle().'.'), 'status');
+        }
+
+      }
+
+      break;
+  }
+}
+
+/**
+ *  AJAX handler for Celebration autocomplete field in Plan content type
+ */
+function sailevents_prepopulate_field_ajax_event_update(array &$form, FormStateInterface $form_state) {
+  $response = new AjaxResponse();
+  $response->addCommand(new ReplaceCommand('#field-plan-event-wrap', $form['field_plan_event']));
+
+  return $response;
+}
+
+/**
+ *  Function returns new array with event that refers to special celebration
+ */
+function create_celebration_event_list($celeb_nid) {
+    $new_list = ['_none' => '- None -'];
+
+    if (!is_null($celeb_nid) && $celeb_nid) {
+      $events = \Drupal::entityQuery('node')
+        ->condition('type', 'event')
+        ->condition('field_event_celebration', $celeb_nid)
+        ->execute();
+
+      $event_ids = array_values($events);
+      $event_nodes = \Drupal\node\Entity\Node::loadMultiple($event_ids);
+
+      foreach ($event_nodes as $event_node) {
+        $new_list[$event_node->id()] = $event_node->getTitle();
+      }
+    }
+
+    return $new_list;
+}
+
+/*
+ *   Callback function #after_build in hook_form_alter.
+ */
+function sailevents_prepopulate_field_after_build($form, &$form_state) {
+
+  // Sets default value in right format (as $short_code and $nid )
+  if (isset($form[0]['target_id']['#default_value'])) {
+    $default_node = $form[0]['target_id']['#default_value'];
+
+    // Check if it is array
+    if (is_array($default_node)) {
+      $default_node = $default_node[0];
+    }
+
+    // Get value from field "Short code"
+    $short_code = $default_node->get('field_celebration_short_code')->getString();
+    $nid = $default_node->id();
+    $title = $default_node->getTitle();
+
+    // If value contains title of default value -> replace it with short code
+    if ($form[0]['target_id']['#value'] === $title.' ('.$nid.')') {
+      $form[0]['target_id']['#value'] = $short_code.' ('.$nid.')';
+    }
+  }
+
+  return $form;
+}
+
+
+/**
+ *  Redirect function for submit button in Plan content type.
+ */
+function sailevents_prepopulate_field_plan_redirect_submit($form, FormStateInterface $form_state) {
+  // Redirect to 'Events Map' view if checked Event and not selected from event select
+  $participation_type_val = $form_state->getValue('field_participation_type');
+  $picked_event = $form_state->getValue('field_plan_event');
+
+  if (empty($picked_event) && !empty($participation_type_val) && $participation_type_val[0]['value'] === 'event') {
+    // Redirect to 'Events Map' page
+    $url = Url::fromRoute('view.events_map.page_1');
+    $form_state->setRedirectUrl($url);
+  } else {
+    // Redirect to default "My plan" page
+    $targetPageId = 18;
+    $form_state->setRedirect('entity.node.canonical', array('node' => $targetPageId));
+  }
+
+}
+
+// If user has ONLY authenticated role
+function is_user_only_authenticated($user) {
+  $roles_arr = $user->getRoles();
+
+  if (
+    !in_array('super_administrator', $roles_arr, true) && 
+    !in_array('administrator', $roles_arr, true)
+  ) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+// If user has ONLY authenticated role
+function is_user_super_admin($user) {
+  $roles_arr = $user->getRoles();
+
+  if (
+    !in_array('super_administrator', $roles_arr, true) 
+  ) {
+    return false;
+  } else {
+    return true;
+  }
+
+}
+
+function create_plan_title($celeb_node, $user) {
+  if (!is_null($celeb_node)) {
+    $shortcode = $celeb_node->get('field_celebration_short_code')->getString();
+  } else {
+    $shortcode = 'No celebration';
+  }
+
+  return $shortcode.' - '.$user->getDisplayName();
+}
